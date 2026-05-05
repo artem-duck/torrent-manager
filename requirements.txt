@@ -1,0 +1,4 @@
+requests
+qbittorrent-api
+Flask
+APScheduler
