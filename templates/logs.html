@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h1>Логи</h1>
+  <table>
+    <thead>
+      <tr>
+        <th>Время</th>
+        <th>Уровень</th>
+        <th>Задача</th>
+        <th>Сообщение</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in logs %}
+      <tr>
+        <td>{{ item.created_at | localtime }}</td>
+        <td>{{ item.level }}</td>
+        <td>{{ item.job_name or "—" }}</td>
+        <td>{{ item.message }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4">Логов пока нет</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

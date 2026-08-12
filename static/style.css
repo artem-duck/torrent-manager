@@ -1,0 +1,12 @@
+body{font-family:Arial,sans-serif;margin:0;background:#0f1115;color:#f0f3f6}
+.topbar{display:flex;justify-content:space-between;padding:14px 20px;background:#1a1f29}
+.topbar a{color:#cfe3ff;margin-left:10px;text-decoration:none}
+.container{padding:20px}
+.card{background:#171b24;border:1px solid #2b3444;border-radius:8px;padding:16px}
+.narrow{max-width:420px;margin:40px auto}
+label{display:block;margin-top:10px}
+input{width:100%;padding:10px;box-sizing:border-box;background:#0f131b;color:#fff;border:1px solid #3a475c;border-radius:6px}
+button{margin-top:12px;padding:10px 14px;border:0;border-radius:6px;background:#3d83f6;color:#fff;cursor:pointer}
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.msg{padding:10px;border-radius:6px;margin-bottom:10px}
+.msg.success{background:#193a24}.msg.error{background:#4b1f1f}

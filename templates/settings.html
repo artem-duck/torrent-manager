@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h1>Настройки</h1>
+  <form method="post">
+    <h3>RuTracker</h3>
+    <label>Логин</label>
+    <input type="text" name="rutracker_user" value="{{ settings.rutracker_user }}" required>
+    <label>Пароль</label>
+    <input type="password" name="rutracker_pass" value="{{ settings.rutracker_pass }}" required>
+
+    <h3>qBittorrent</h3>
+    <label>QB_HOST</label>
+    <input type="text" name="qb_host" value="{{ settings.qb_host }}" required>
+    <label>Логин</label>
+    <input type="text" name="qb_user" value="{{ settings.qb_user }}" required>
+    <label>Пароль</label>
+    <input type="password" name="qb_pass" value="{{ settings.qb_pass }}" required>
+
+    <h3>Планировщик</h3>
+    <label>Интервал (мин)</label>
+    <input type="number" name="global_check_interval_min" min="1" value="{{ settings.global_check_interval_min }}" required>
+
+    <button type="submit">Сохранить</button>
+  </form>
+
+  <div class="actions">
+    <form method="post" action="{{ url_for('test_rutracker') }}"><button type="submit">Проверить RuTracker</button></form>
+    <form method="post" action="{{ url_for('test_qb') }}"><button type="submit">Проверить qBittorrent</button></form>
+  </div>
+</div>
+{% endblock %}

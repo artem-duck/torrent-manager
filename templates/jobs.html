@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="grid">
+  <div class="card">
+    <h1>Добавить задачу</h1>
+    <form method="post" action="{{ url_for('create_job') }}">
+      <label>Название</label>
+      <input type="text" name="name" required>
+      <label>Ссылка RuTracker</label>
+      <input type="text" name="rutracker_url" placeholder="https://rutracker.org/forum/viewtopic.php?t=..." required>
+      <label>SAVE_PATH (путь для qBittorrent)</label>
+      <input type="text" name="save_path" required>
+      <label>Категория</label>
+      <input type="text" name="category">
+      <label>Ключ поиска старого торрента</label>
+      <input type="text" name="torrent_name_keyword" required>
+      <label>Индивидуальный интервал (мин, пусто = глобальный)</label>
+      <input type="number" name="check_interval_min" min="1">
+      <label><input type="checkbox" name="enabled" checked> Включена</label>
+      <button type="submit">Добавить</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h1>Список задач</h1>
+    {% for job in jobs %}
+    <details class="job">
+      <summary>
+        <strong>{{ job.name }}</strong>
+        <span class="muted">#{{ job.id }} | {{ "вкл" if job.enabled else "выкл" }} | статус: {{ job.last_status or "—" }}</span>
+      </summary>
+      <form method="post" action="{{ url_for('update_job', job_id=job.id) }}">
+        <label>Название</label>
+        <input type="text" name="name" value="{{ job.name }}" required>
+        <label>Ссылка RuTracker</label>
+        <input type="text" name="rutracker_url" value="{{ job.rutracker_url }}" required>
+        <label>SAVE_PATH</label>
+        <input type="text" name="save_path" value="{{ job.save_path }}" required>
+        <label>Категория</label>
+        <input type="text" name="category" value="{{ job.category }}">
+        <label>Ключ поиска</label>
+        <input type="text" name="torrent_name_keyword" value="{{ job.torrent_name_keyword }}" required>
+        <label>Индивидуальный интервал (мин)</label>
+        <input type="number" name="check_interval_min" min="1" value="{{ job.check_interval_min or '' }}">
+        <label><input type="checkbox" name="enabled" {% if job.enabled %}checked{% endif %}> Включена</label>
+        <div class="actions">
+          <button type="submit">Сохранить</button>
+      </form>
+      <form method="post" action="{{ url_for('run_job_now', job_id=job.id) }}">
+        <button type="submit">Проверить сейчас</button>
+      </form>
+      <form method="post" action="{{ url_for('delete_job', job_id=job.id) }}" onsubmit="return confirm('Удалить задачу?');">
+        <button type="submit" class="danger">Удалить</button>
+      </form>
+        </div>
+      {% if job.last_error %}
+      <p class="error-line">Ошибка: {{ job.last_error }}</p>
+      {% endif %}
+      <p class="muted">Последняя проверка: {{ job.last_checked_at | localtime }}</p>
+    </details>
+    {% else %}
+    <p>Пока нет задач.</p>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}

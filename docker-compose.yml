@@ -1,11 +1,34 @@
 services:
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    restart: unless-stopped
+    shm_size: "1gb"
+    ports:
+      - "8191:8191"
+    environment:
+      - LOG_LEVEL=info
+      - BROWSER_TIMEOUT=240000
+      - TZ=${APP_TIMEZONE:-Europe/Moscow}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8191/', timeout=5)\""]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 120s
+
   torrent_manager:
     build: .
     container_name: torrent_manager
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      - TZ=${APP_TIMEZONE:-Europe/Moscow}
     volumes:
       - ./data:/app/data
     ports:
       - "5000:5000"
+    depends_on:
+      flaresolverr:
+        condition: service_healthy
