@@ -1,44 +1,36 @@
-# Torrent Manager Web UI
+# Веб-интерфейс Torrent Manager
 
-Веб-интерфейс для управления задачами обновления RuTracker -> qBittorrent.
+Управление задачами RuTracker → qBittorrent и уведомлениями в Telegram.
 
 ## Возможности
 
 - Несколько задач с разными ссылками и `SAVE_PATH`
-- Настройка логина/пароля RuTracker через UI
-- Настройка `QB_HOST`, `QB_USER`, `QB_PASS` через UI
-- Ручной запуск задачи
-- Фоновая проверка по расписанию
-- Просмотр логов в UI
+- Логин и пароль RuTracker в настройках
+- `QB_HOST`, `QB_USER`, `QB_PASS` в настройках
+- Ручная проверка и фоновое расписание
+- Логи в веб-интерфейсе
+- Telegram-бот: токен в настройках, фильтры командой `/settings`
+- Уведомление, когда qBittorrent докачал торрент до 100%
 
 ## Запуск в Docker
 
 ```bash
-cd /mnt/disk3/scripts
+cd /mnt/disk1/isos/torrent-manager
 cp .env.example .env
 mkdir -p data
-docker compose build
-docker compose up -d
+docker compose up -d --build
 ```
 
-После запуска откройте:
-
-- `http://IP_ВАШЕГО_UNRAID:5000`
-
-Вход по данным из `.env`:
-
-- `ADMIN_USER`
-- `ADMIN_PASSWORD`
+Откройте `http://IP_ВАШЕГО_СЕРВЕРА:5000`. Вход — `ADMIN_USER` и `ADMIN_PASSWORD` из `.env`.
 
 ## Первый старт
 
-1. Откройте раздел "Настройки"
-2. Заполните RuTracker и qBittorrent
-3. Нажмите "Проверить RuTracker" и "Проверить qBittorrent"
-4. Откройте "Задачи", добавьте минимум одну раздачу
-5. Нажмите "Проверить сейчас"
+1. **Настройки** — RuTracker и qBittorrent, кнопки проверки.
+2. Токен Telegram-бота, галочка уведомлений, **Сохранить**.
+3. В Telegram боту: `/start`, затем `/settings`.
+4. **Задачи** — добавьте раздачу, нажмите «Проверить сейчас».
 
-## Логи
+## Логи контейнера
 
 ```bash
 docker compose logs -f torrent_manager
