@@ -4,18 +4,22 @@ services:
     container_name: flaresolverr
     restart: unless-stopped
     shm_size: "1gb"
+    cpus: "1.0"
+    mem_limit: 1536m
     ports:
       - "8191:8191"
     environment:
-      - LOG_LEVEL=info
-      - BROWSER_TIMEOUT=240000
+      - LOG_LEVEL=error
+      - HEADLESS=true
+      - BROWSER_TIMEOUT=90000
       - TZ=${APP_TIMEZONE:-Europe/Moscow}
-    healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8191/', timeout=5)\""]
-      interval: 10s
-      timeout: 10s
-      retries: 30
-      start_period: 120s
+    tmpfs:
+      - /tmp:size=512M,mode=1777
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"
 
   torrent_manager:
     build: .
@@ -29,6 +33,10 @@ services:
       - ./data:/app/data
     ports:
       - "5000:5000"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"
     depends_on:
-      flaresolverr:
-        condition: service_healthy
+      - flaresolverr

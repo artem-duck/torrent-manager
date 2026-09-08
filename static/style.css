@@ -9,4 +9,6 @@ input{width:100%;padding:10px;box-sizing:border-box;background:#0f131b;color:#ff
 button{margin-top:12px;padding:10px 14px;border:0;border-radius:6px;background:#3d83f6;color:#fff;cursor:pointer}
 .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
 .msg{padding:10px;border-radius:6px;margin-bottom:10px}
-.msg.success{background:#193a24}.msg.error{background:#4b1f1f}
+.muted{color:#9fb0c3;font-size:0.92rem}
+.card a{color:#8ec5ff}
+.card code{background:#0f131b;padding:2px 6px;border-radius:4px}

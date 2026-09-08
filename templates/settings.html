@@ -17,6 +17,13 @@
     <label>Пароль</label>
     <input type="password" name="qb_pass" value="{{ settings.qb_pass }}" required>
 
+    <h3>Telegram</h3>
+    <p class="muted">Создайте бота через <a href="https://t.me/BotFather" target="_blank">@BotFather</a>, вставьте токен ниже, сохраните и отправьте боту <code>/start</code>.</p>
+    <label>Токен бота</label>
+    <input type="text" name="telegram_bot_token" value="{{ settings.telegram_bot_token or '' }}" placeholder="123456789:AA...">
+    <label><input type="checkbox" name="telegram_enabled" {% if settings.telegram_enabled %}checked{% endif %}> Включить уведомления в Telegram</label>
+    <p class="muted">Подключено чатов: {{ telegram_subscribers }}. В боте команда /settings: ошибки, замена, добавление и <b>скачивание 100%</b>.</p>
+
     <h3>Планировщик</h3>
     <label>Интервал (мин)</label>
     <input type="number" name="global_check_interval_min" min="1" value="{{ settings.global_check_interval_min }}" required>
@@ -27,6 +34,7 @@
   <div class="actions">
     <form method="post" action="{{ url_for('test_rutracker') }}"><button type="submit">Проверить RuTracker</button></form>
     <form method="post" action="{{ url_for('test_qb') }}"><button type="submit">Проверить qBittorrent</button></form>
+    <form method="post" action="{{ url_for('test_telegram') }}"><button type="submit">Проверить Telegram</button></form>
   </div>
 </div>
 {% endblock %}

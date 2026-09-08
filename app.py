@@ -20,6 +20,8 @@ from flask import Flask, flash, g, redirect, render_template, request, session, 
 from qbittorrentapi import Client
 from werkzeug.serving import WSGIRequestHandler
 
+from telegram_bot import TelegramNotifier
+
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv("DATA_DIR", str(BASE_DIR / "data")))
@@ -34,8 +36,8 @@ APP_TZ = ZoneInfo(APP_TIMEZONE)
 RUTRACKER_LOGIN_URL = "https://rutracker.org/forum/login.php"
 RUTRACKER_BASE_URL = "https://rutracker.org"
 FLARESOLVERR_URL = os.getenv("FLARESOLVERR_URL", "http://flaresolverr:8191")
-FLARESOLVERR_TIMEOUT = int(os.getenv("FLARESOLVERR_TIMEOUT", "240"))
-FLARESOLVERR_RETRIES = int(os.getenv("FLARESOLVERR_RETRIES", "3"))
+FLARESOLVERR_TIMEOUT = int(os.getenv("FLARESOLVERR_TIMEOUT", "90"))
+FLARESOLVERR_RETRIES = int(os.getenv("FLARESOLVERR_RETRIES", "2"))
 FLARESOLVERR_STARTUP_TIMEOUT = int(os.getenv("FLARESOLVERR_STARTUP_TIMEOUT", "180"))
 FLARESOLVERR_SESSION = os.getenv("FLARESOLVERR_SESSION", "torrent-manager")
 RUTRACKER_STATE_FILE = DATA_DIR / "cookies" / "rutracker_session.json"
@@ -43,6 +45,7 @@ RUTRACKER_STATE_FILE = DATA_DIR / "cookies" / "rutracker_session.json"
 _flare_lock = threading.Lock()
 _job_lock = threading.Lock()
 _flare_user_agent: str | None = None
+telegram_notifier = TelegramNotifier(DB_PATH, APP_TIMEZONE)
 
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
@@ -102,6 +105,13 @@ def close_db(_):
         db.close()
 
 
+def _ensure_column(cursor, table: str, column: str, definition: str):
+    cursor.execute(f"PRAGMA table_info({table})")
+    columns = {row[1] for row in cursor.fetchall()}
+    if column not in columns:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def init_db():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     (DATA_DIR / "cookies").mkdir(parents=True, exist_ok=True)
@@ -155,6 +165,26 @@ def init_db():
         )
         """
     )
+    _ensure_column(cursor, "app_settings", "telegram_bot_token", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(cursor, "app_settings", "telegram_enabled", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(cursor, "torrent_jobs", "qb_hash", "TEXT")
+    _ensure_column(cursor, "torrent_jobs", "qb_completed_hash", "TEXT")
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS telegram_subscribers (
+            chat_id INTEGER PRIMARY KEY,
+            username TEXT NOT NULL DEFAULT '',
+            notify_all INTEGER NOT NULL DEFAULT 1,
+            notify_errors INTEGER NOT NULL DEFAULT 1,
+            notify_updated INTEGER NOT NULL DEFAULT 1,
+            notify_added INTEGER NOT NULL DEFAULT 1,
+            notify_completed INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    _ensure_column(cursor, "telegram_subscribers", "notify_completed", "INTEGER NOT NULL DEFAULT 1")
     ts = now_iso()
     cursor.execute("SELECT id FROM app_settings WHERE id = 1")
     if cursor.fetchone() is None:
@@ -180,12 +210,34 @@ def login_required(view):
     return wrapped
 
 
-def log_event(db, level: str, message: str, job_id=None):
+def log_event(db, level: str, message: str, job_id=None, event_type=None, telegram_events=None):
     db.execute(
         "INSERT INTO job_logs (job_id, level, message, created_at) VALUES (?, ?, ?, ?)",
         (job_id, level, message, now_iso()),
     )
     db.commit()
+
+    job_name = None
+    if job_id is not None:
+        row = db.execute("SELECT name FROM torrent_jobs WHERE id = ?", (job_id,)).fetchone()
+        if row:
+            job_name = row["name"]
+
+    events = list(telegram_events or [])
+    if not events:
+        if event_type:
+            events = [event_type]
+        elif level == "ERROR":
+            events = ["error"]
+        elif "не изменился" in message:
+            events = ["unchanged"]
+        elif "обновлён" in message.lower():
+            events = ["updated"]
+        elif "добавлен в qbittorrent" in message.lower():
+            events = ["added"]
+
+    for event in events:
+        telegram_notifier.notify(message, level, job_name, event)
 
 
 def get_settings(db):
@@ -531,12 +583,123 @@ def extract_download_link(page_html: str):
     return None
 
 
-def find_existing_torrent_by_name(qb, name_part: str):
-    key = name_part.lower().strip()
+def find_torrent_by_keyword(qb, name_part: str):
+    key = (name_part or "").lower().strip()
+    if not key:
+        return None
     for torrent in qb.torrents_info():
-        if key and key in torrent.name.lower():
-            return torrent.hash
+        if key in torrent.name.lower():
+            return torrent
     return None
+
+
+def find_existing_torrent_by_name(qb, name_part: str):
+    torrent = find_torrent_by_keyword(qb, name_part)
+    return torrent.hash if torrent else None
+
+
+def wait_for_qb_torrent(qb, name_part: str, timeout_sec: int = 20):
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        torrent = find_torrent_by_keyword(qb, name_part)
+        if torrent is not None:
+            return torrent
+        time.sleep(1)
+    return None
+
+
+def format_size(num_bytes) -> str:
+    try:
+        size = float(num_bytes or 0)
+    except (TypeError, ValueError):
+        return "—"
+    units = ("Б", "КБ", "МБ", "ГБ", "ТБ")
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} ТБ"
+
+
+def _qb_state_name(torrent) -> str:
+    state = str(getattr(torrent, "state", "") or "")
+    if "." in state:
+        state = state.rsplit(".", 1)[-1]
+    return state.lower()
+
+
+def _qb_is_download_complete(torrent) -> bool:
+    try:
+        progress = float(getattr(torrent, "progress", 0) or 0)
+    except (TypeError, ValueError):
+        progress = 0
+    if progress >= 0.999:
+        return True
+    return _qb_state_name(torrent) in {
+        "uploading",
+        "stalledup",
+        "pausedup",
+        "queuedup",
+        "checkingup",
+        "forcedup",
+        "stoppedup",
+    }
+
+
+def check_qb_completions():
+    db = sqlite3.connect(DB_PATH, timeout=30)
+    db.row_factory = sqlite3.Row
+    try:
+        settings = get_settings(db)
+        if not settings or not settings["qb_host"] or not settings["qb_user"] or not settings["qb_pass"]:
+            return
+        jobs = db.execute(
+            """
+            SELECT id, name, torrent_name_keyword, qb_hash, qb_completed_hash
+            FROM torrent_jobs
+            WHERE qb_hash IS NOT NULL AND qb_hash != ''
+            """
+        ).fetchall()
+        if not jobs:
+            return
+        try:
+            qb = get_qb_client(settings)
+        except Exception as err:
+            logging.warning("qBittorrent completion check skipped: %s", err)
+            return
+
+        for job in jobs:
+            qb_hash = job["qb_hash"]
+            if job["qb_completed_hash"] == qb_hash:
+                continue
+            torrents = qb.torrents_info(torrent_hashes=qb_hash)
+            torrent = torrents[0] if torrents else None
+            if torrent is None:
+                torrent = find_torrent_by_keyword(qb, job["torrent_name_keyword"])
+                if torrent is None:
+                    continue
+                qb_hash = torrent.hash
+                db.execute("UPDATE torrent_jobs SET qb_hash = ? WHERE id = ?", (qb_hash, job["id"]))
+                db.commit()
+            if not _qb_is_download_complete(torrent):
+                continue
+            db.execute(
+                "UPDATE torrent_jobs SET qb_completed_hash = ?, updated_at = ? WHERE id = ?",
+                (qb_hash, now_iso(), job["id"]),
+            )
+            db.commit()
+            size_text = format_size(getattr(torrent, "size", 0))
+            torrent_name = getattr(torrent, "name", "") or job["name"]
+            log_event(
+                db,
+                "INFO",
+                f"[{job['name']}] Скачивание завершено (100%). Файл готов: {torrent_name} ({size_text})",
+                job["id"],
+                event_type="completed",
+            )
+            logging.info("qBittorrent download complete for job %s: %s", job["id"], torrent_name)
+    finally:
+        db.close()
 
 
 def run_job(db, job_id: int):
@@ -551,6 +714,13 @@ def run_job(db, job_id: int):
 
     torrent_file = DATA_DIR / "torrents" / f"job_{job_id}.torrent"
 
+    try:
+        return _run_job_body(db, job, settings, job_id, torrent_file)
+    finally:
+        _flare_destroy_session()
+
+
+def _run_job_body(db, job, settings, job_id: int, torrent_file: Path):
     state = ensure_rutracker_session(settings)
     page_html = get_rutracker_content(job["rutracker_url"], state)
     state = _load_rutracker_state()
@@ -565,13 +735,11 @@ def run_job(db, job_id: int):
     if _is_cloudflare_page(page_html):
         raise RuntimeError("Cloudflare не пройден для страницы раздачи")
 
-    if page_html:
-        debug_file = DATA_DIR / "debug" / f"job_{job_id}_last.html"
-        debug_file.parent.mkdir(parents=True, exist_ok=True)
-        debug_file.write_text(page_html, encoding="utf-8")
-
     dl_link = extract_download_link(page_html or "")
     if not dl_link:
+        debug_file = DATA_DIR / "debug" / f"job_{job_id}_last.html"
+        debug_file.parent.mkdir(parents=True, exist_ok=True)
+        debug_file.write_text(page_html or "", encoding="utf-8")
         raise RuntimeError("Не найдена ссылка на .torrent (HTML страницы изменился или Cloudflare не пройден)")
 
     data = download_rutracker_file(dl_link, state)
@@ -586,7 +754,7 @@ def run_job(db, job_id: int):
             (now_iso(), "unchanged", now_iso(), job_id),
         )
         db.commit()
-        log_event(db, "INFO", f"[{job['name']}] Торрент не изменился", job_id)
+        log_event(db, "INFO", f"[{job['name']}] Торрент не изменился", job_id, event_type="unchanged")
         return "unchanged"
 
     qb = get_qb_client(settings)
@@ -594,6 +762,13 @@ def run_job(db, job_id: int):
     if old_hash:
         qb.torrents_delete(delete_files=False, torrent_hashes=old_hash)
         time.sleep(1)
+        log_event(
+            db,
+            "INFO",
+            f"[{job['name']}] Старый торрент заменён на новую версию",
+            job_id,
+            event_type="updated",
+        )
 
     with torrent_file.open("rb") as f:
         qb.torrents_add(
@@ -605,16 +780,25 @@ def run_job(db, job_id: int):
             content_layout="Original",
         )
 
+    added = wait_for_qb_torrent(qb, job["torrent_name_keyword"])
+    qb_hash = added.hash if added else None
     db.execute(
         """
         UPDATE torrent_jobs
-        SET last_hash = ?, last_checked_at = ?, last_status = ?, last_error = NULL, updated_at = ?
+        SET last_hash = ?, last_checked_at = ?, last_status = ?, last_error = NULL, updated_at = ?,
+            qb_hash = ?, qb_completed_hash = NULL
         WHERE id = ?
         """,
-        (new_hash, now_iso(), "updated", now_iso(), job_id),
+        (new_hash, now_iso(), "updated", now_iso(), qb_hash, job_id),
     )
     db.commit()
-    log_event(db, "INFO", f"[{job['name']}] Торрент обновлён и добавлен в qBittorrent", job_id)
+    log_event(
+        db,
+        "INFO",
+        f"[{job['name']}] Торрент добавлен в qBittorrent",
+        job_id,
+        event_type="added",
+    )
     return "updated"
 
 
@@ -630,7 +814,7 @@ def _run_job_thread(job_id, job_name):
             (now_iso(), "error", str(err), now_iso(), job_id),
         )
         db.commit()
-        log_event(db, "ERROR", f"[{job_name}] {err}", job_id)
+        log_event(db, "ERROR", f"[{job_name}] {err}", job_id, event_type="error")
     finally:
         db.close()
 
@@ -658,6 +842,7 @@ def scheduler_tick():
                 continue
             t = threading.Thread(target=_run_job_thread, args=(job["id"], job["name"]), daemon=True)
             t.start()
+            break
     finally:
         db.close()
 
@@ -695,7 +880,8 @@ def settings():
         db.execute(
             """
             UPDATE app_settings
-            SET rutracker_user = ?, rutracker_pass = ?, qb_host = ?, qb_user = ?, qb_pass = ?, global_check_interval_min = ?, updated_at = ?
+            SET rutracker_user = ?, rutracker_pass = ?, qb_host = ?, qb_user = ?, qb_pass = ?,
+                global_check_interval_min = ?, telegram_bot_token = ?, telegram_enabled = ?, updated_at = ?
             WHERE id = 1
             """,
             (
@@ -705,13 +891,16 @@ def settings():
                 request.form.get("qb_user", "").strip(),
                 request.form.get("qb_pass", "").strip(),
                 int(request.form.get("global_check_interval_min", "30")),
+                request.form.get("telegram_bot_token", "").strip(),
+                1 if request.form.get("telegram_enabled") == "on" else 0,
                 now_iso(),
             ),
         )
         db.commit()
         flash("Настройки сохранены", "success")
         return redirect(url_for("settings"))
-    return render_template("settings.html", settings=get_settings(db))
+    subscribers = db.execute("SELECT COUNT(*) AS cnt FROM telegram_subscribers").fetchone()["cnt"]
+    return render_template("settings.html", settings=get_settings(db), telegram_subscribers=subscribers)
 
 
 @app.route("/settings/test-rutracker", methods=["POST"])
@@ -726,6 +915,19 @@ def test_rutracker():
         flash("RuTracker: вход успешен", "success")
     except Exception as err:
         flash(f"RuTracker: ошибка проверки ({err})", "error")
+    finally:
+        _flare_destroy_session()
+    return redirect(url_for("settings"))
+
+
+@app.route("/settings/test-telegram", methods=["POST"])
+@login_required
+def test_telegram():
+    try:
+        telegram_notifier.send_test_message()
+        flash("Telegram: тестовое сообщение отправлено", "success")
+    except Exception as err:
+        flash(f"Telegram: ошибка ({err})", "error")
     return redirect(url_for("settings"))
 
 
@@ -856,17 +1058,14 @@ def logs():
 def start_scheduler():
     if not scheduler.running:
         scheduler.add_job(scheduler_tick, "interval", minutes=1, id="jobs_tick", replace_existing=True)
+        scheduler.add_job(check_qb_completions, "interval", seconds=30, id="qb_complete_tick", replace_existing=True)
         scheduler.start()
+        logging.info("Планировщик запущен: проверка RuTracker каждую минуту, готовность qBittorrent каждые 30 сек")
 
 
 if __name__ == "__main__":
     setup_logging()
     init_db()
-    logging.info("Ожидание готовности FlareSolverr...")
-    try:
-        _wait_for_flaresolverr()
-        logging.info("FlareSolverr готов")
-    except RuntimeError as err:
-        logging.warning("%s", err)
     start_scheduler()
+    telegram_notifier.start()
     app.run(host="0.0.0.0", port=5000, request_handler=LocalTimeRequestHandler)
