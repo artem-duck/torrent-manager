@@ -583,6 +583,266 @@ def extract_download_link(page_html: str):
     return None
 
 
+def _html_fragment_to_text(fragment: str) -> str:
+    fragment = re.sub(r"(?is)<script[^>]*>.*?</script>", "", fragment)
+    fragment = re.sub(r"(?is)<style[^>]*>.*?</style>", "", fragment)
+    fragment = re.sub(r'(?is)<blockquote[^>]*>.*?</blockquote>', "", fragment)
+    fragment = re.sub(r'(?is)<div class="q[^"]*"[^>]*>.*?</div>', "", fragment)
+    fragment = re.sub(r"(?is)<img[^>]*>", "", fragment)
+    fragment = re.sub(r"(?is)<br\s*/?>", "\n", fragment)
+    fragment = re.sub(r"(?is)</(p|div|tr|li|h[1-6]|pre)>", "\n", fragment)
+    fragment = re.sub(r"(?is)<[^>]+>", "", fragment)
+    fragment = html.unescape(fragment)
+    fragment = fragment.replace("\xa0", " ")
+    fragment = re.sub(r"[ \t]+\n", "\n", fragment)
+    fragment = re.sub(r"\n{3,}", "\n\n", fragment)
+    fragment = re.sub(r"[ \t]{2,}", " ", fragment)
+    return fragment.strip()
+
+
+def _clean_nick(nick: str) -> str:
+    nick = html.unescape(nick or "")
+    nick = re.sub(r"<wbr\s*/?>", "", nick, flags=re.I)
+    nick = re.sub(r"<[^>]+>", "", nick)
+    nick = re.sub(r"\s+", " ", nick).strip()
+    return nick
+
+
+def _extract_nick(window: str) -> str:
+    poster = re.search(r"bbcode\.onclickPoster\(\s*'((?:\\'|[^'])+)'", window, flags=re.I)
+    if poster:
+        return _clean_nick(poster.group(1).replace("\\'", "'"))
+    patterns = [
+        r'data-name="([^"]+)"',
+        r'<p[^>]*class="[^"]*\bnick\b[^"]*"[^>]*>[\s\S]{0,1500}?<b>([^<]+)</b>',
+        r'<p[^>]*class="[^"]*\bnick\b[^"]*"[^>]*>[\s\S]{0,1500}?<a[^>]*>([\s\S]{2,80}?)</a>',
+        r'class="[^"]*last-editor[^"]*"[^>]*>([^<]+)<',
+        r'class="p-author"[^>]*>([^<]+)<',
+    ]
+    found = []
+    for pattern in patterns:
+        found.extend(re.finditer(pattern, window, flags=re.IGNORECASE))
+    if not found:
+        return ""
+    return _clean_nick(found[-1].group(1))
+
+
+def _extract_post_time(window: str) -> str:
+    date = re.search(r"(\d{1,2}-[А-Яа-яA-Za-z]{3}-\d{2}\s+\d{1,2}:\d{2})", window)
+    if date:
+        return date.group(1)
+    patterns = [
+        r'class="p-link[^"]*"[^>]*>([^<]{6,80})</',
+        r'class="post-time"[^>]*>[\s\S]{0,400}?>([^<]{6,80})</',
+    ]
+    for pattern in patterns:
+        matches = list(re.finditer(pattern, window, flags=re.IGNORECASE))
+        if matches:
+            time_s = html.unescape(matches[-1].group(1)).strip()
+            time_s = re.sub(r"\[Цитировать\]", "", time_s, flags=re.IGNORECASE).strip()
+            if re.search(r"\d{1,2}:\d{2}", time_s):
+                return time_s
+    return ""
+
+
+def _extract_divs_by_class(page_html: str, class_name: str) -> list[tuple[int, str]]:
+    matches = []
+    lower = page_html.lower()
+    start = 0
+    class_token = class_name.lower()
+    while True:
+        idx = lower.find("<div", start)
+        if idx < 0:
+            break
+        tag_end = page_html.find(">", idx)
+        if tag_end < 0:
+            break
+        open_tag = page_html[idx : tag_end + 1]
+        if class_token not in open_tag.lower() or "class=" not in open_tag.lower():
+            start = idx + 4
+            continue
+        if not re.search(rf"""class=["'][^"']*\b{re.escape(class_name)}\b[^"']*["']""", open_tag, re.I):
+            start = idx + 4
+            continue
+        pos = tag_end + 1
+        depth = 1
+        cursor = pos
+        while cursor < len(page_html) and depth:
+            next_open = lower.find("<div", cursor)
+            next_close = lower.find("</div", cursor)
+            if next_close < 0:
+                break
+            if next_open >= 0 and next_open < next_close:
+                depth += 1
+                cursor = next_open + 4
+            else:
+                depth -= 1
+                if depth == 0:
+                    matches.append((idx, page_html[pos:next_close]))
+                    start = next_close + 5
+                    break
+                cursor = next_close + 5
+        else:
+            start = idx + 4
+    return matches
+
+
+def extract_pinned_author_note(page_html: str) -> dict | None:
+    match = re.search(
+        r'class="t-note[^"]*t-pinned-post[^"]*"[\s\S]{0,8000}?class="note-html[^"]*post_body[^"]*">([\s\S]*?)</div>',
+        page_html,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    window = page_html[max(0, match.start() - 2500) : match.end()]
+    nick = _extract_nick(window)
+    time_s = _extract_post_time(window)
+    if not time_s:
+        time_m = re.search(r'href="viewtopic\.php\?p=\d+"[^>]*>([^<]+)<', window, flags=re.I)
+        if time_m:
+            time_s = html.unescape(time_m.group(1)).strip()
+    text = _html_fragment_to_text(match.group(1))
+    if not text:
+        return None
+    return {"nick": nick, "time": time_s, "text": text}
+
+
+def extract_topic_posts(page_html: str) -> list[dict]:
+    posts = []
+    parts = re.split(r'<tbody\b', page_html, flags=re.IGNORECASE)
+    for part in parts[1:]:
+        header_end = part.find(">")
+        header = part[: max(header_end, 0) + 1]
+        if not re.search(r'\bid=["\']post_\d+', header, flags=re.I):
+            continue
+        block = part[:80000]
+        body_match = re.search(
+            r'<div[^>]*\bid="p-\d+"[^>]*>([\s\S]*?)</div>\s*<!--/post_body-->',
+            block,
+            flags=re.I,
+        )
+        if not body_match:
+            body_match = re.search(
+                r'<div[^>]*class="[^"]*\bpost_body\b[^"]*"[^>]*>([\s\S]*?)</div>\s*<!--/post_body-->',
+                block,
+                flags=re.I,
+            )
+        if not body_match:
+            continue
+        nick = _extract_nick(block[: body_match.start() + 400])
+        time_s = _extract_post_time(block[: body_match.start() + 800])
+        text = _html_fragment_to_text(body_match.group(1))
+        is_author = bool(re.search(r'class="[^"]*\bnick-author\b', block[: body_match.start()], flags=re.I))
+        if nick and text:
+            posts.append({"nick": nick, "time": time_s, "text": text, "is_author": is_author})
+    if posts:
+        return posts
+
+    bodies = _extract_divs_by_class(page_html, "post_body")
+    for start_idx, body_html in bodies:
+        if re.search(r'class="note-html', page_html[max(0, start_idx - 80) : start_idx + 40], flags=re.I):
+            continue
+        window = page_html[max(0, start_idx - 8000) : start_idx + 200]
+        nick = _extract_nick(window)
+        time_s = _extract_post_time(window + body_html[:1500])
+        text = _html_fragment_to_text(body_html)
+        if nick and text:
+            posts.append({"nick": nick, "time": time_s, "text": text, "is_author": "nick-author" in window})
+    return posts
+
+
+def _topic_id_from_url(url: str) -> str | None:
+    match = re.search(r"[?&]t=(\d+)", url)
+    return match.group(1) if match else None
+
+
+def _topic_last_page_url(topic_url: str, page_html: str) -> str | None:
+    topic_id = _topic_id_from_url(topic_url)
+    if not topic_id:
+        return None
+    decoded = html.unescape(page_html)
+    starts = [int(n) for n in re.findall(rf"viewtopic\.php\?[^\"']*?t={topic_id}[^\"']*?[?&]start=(\d+)", decoded, flags=re.I)]
+    starts += [int(n) for n in re.findall(rf"viewtopic\.php\?[^\"']*?start=(\d+)", decoded, flags=re.I)]
+    max_start = max(starts) if starts else 0
+    # RuTracker/phpBB: большой start открывает последнюю страницу темы
+    last_url = f"https://rutracker.org/forum/viewtopic.php?t={topic_id}&start={max(max_start, 9999)}"
+    current_start = re.search(r"[?&]start=(\d+)", topic_url)
+    if current_start and int(current_start.group(1)) >= max_start and max_start > 0:
+        return None
+    return last_url
+
+
+def latest_author_post(first_page_html: str, last_page_html: str | None = None) -> dict | None:
+    pinned = extract_pinned_author_note(first_page_html)
+    if pinned:
+        return pinned
+    first_posts = extract_topic_posts(first_page_html)
+    last_html = last_page_html or first_page_html
+    last_posts = extract_topic_posts(last_html)
+    if not first_posts and not last_posts:
+        return None
+    author_posts = [p for p in first_posts + last_posts if p.get("is_author")]
+    if author_posts:
+        return author_posts[-1]
+    author = (first_posts[0]["nick"] if first_posts else last_posts[0]["nick"]).strip()
+    combined = first_posts + last_posts if last_html is not first_page_html else first_posts
+    by_author = [p for p in combined if p["nick"].strip().lower() == author.lower()]
+    if by_author:
+        return by_author[-1]
+    if last_posts:
+        return last_posts[-1]
+    return first_posts[-1]
+
+
+def format_author_quote(topic_url: str, post: dict | None, limit: int = 1200) -> str:
+    if not post:
+        return ""
+    text = post.get("text") or ""
+    if len(text) > limit:
+        text = text[: limit - 1].rstrip() + "…"
+    lines = [f"Раздача: {topic_url}", f"Автор: {post.get('nick') or '—'}"]
+    if post.get("time"):
+        lines.append(post["time"])
+    lines.append("")
+    lines.append(text)
+    return "\n".join(lines)
+
+
+def collect_author_update_quote(topic_url: str, page_html: str, state: dict) -> str:
+    last_html = page_html
+    last_url = None
+    try:
+        last_url = _topic_last_page_url(topic_url, page_html)
+        if last_url:
+            fetched = get_rutracker_content(last_url, state)
+            if fetched and not _is_cloudflare_page(fetched) and not _is_login_page(fetched):
+                last_html = fetched
+    except Exception as err:
+        logging.warning("Could not load last topic page for quote: %s", err)
+    try:
+        post = latest_author_post(page_html, last_html)
+        quote = format_author_quote(topic_url, post)
+        if not quote:
+            logging.warning(
+                "Author quote empty for %s (html=%s post_body=%s onclickPoster=%s pinned=%s first_posts=%s last_posts=%s last_url=%s)",
+                topic_url,
+                len(page_html or ""),
+                (page_html or "").lower().count("post_body"),
+                (page_html or "").count("onclickPoster"),
+                1 if extract_pinned_author_note(page_html) else 0,
+                len(extract_topic_posts(page_html)),
+                len(extract_topic_posts(last_html)),
+                last_url,
+            )
+        else:
+            logging.info("Author quote parsed for %s: %s", topic_url, (post or {}).get("nick"))
+        return quote
+    except Exception as err:
+        logging.warning("Could not parse author quote: %s", err)
+        return ""
+
+
 def find_torrent_by_keyword(qb, name_part: str):
     key = (name_part or "").lower().strip()
     if not key:
@@ -757,6 +1017,9 @@ def _run_job_body(db, job, settings, job_id: int, torrent_file: Path):
         log_event(db, "INFO", f"[{job['name']}] Торрент не изменился", job_id, event_type="unchanged")
         return "unchanged"
 
+    author_quote = collect_author_update_quote(job["rutracker_url"], page_html, state)
+    quote_suffix = f"\n\n{author_quote}" if author_quote else ""
+
     qb = get_qb_client(settings)
     old_hash = find_existing_torrent_by_name(qb, job["torrent_name_keyword"])
     if old_hash:
@@ -765,7 +1028,7 @@ def _run_job_body(db, job, settings, job_id: int, torrent_file: Path):
         log_event(
             db,
             "INFO",
-            f"[{job['name']}] Старый торрент заменён на новую версию",
+            f"[{job['name']}] Старый торрент заменён на новую версию{quote_suffix}",
             job_id,
             event_type="updated",
         )
@@ -795,7 +1058,7 @@ def _run_job_body(db, job, settings, job_id: int, torrent_file: Path):
     log_event(
         db,
         "INFO",
-        f"[{job['name']}] Торрент добавлен в qBittorrent",
+        f"[{job['name']}] Торрент добавлен в qBittorrent{quote_suffix}",
         job_id,
         event_type="added",
     )

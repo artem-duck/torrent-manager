@@ -187,6 +187,8 @@ class TelegramNotifier:
             title = html.escape(job_name or "Torrent Manager")
             body = html.escape(message)
             text = f"{level_icon} <b>{html.escape(level)}</b> | {title}\n<code>{stamp}</code>\n\n{body}"
+            if len(text) > 4000:
+                text = text[:3999] + "…"
 
             for sub in subscribers:
                 if not self._should_notify(sub, event_type):
